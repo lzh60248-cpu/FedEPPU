@@ -1,0 +1,1004 @@
+\documentclass[lettersize,journal]{IEEEtran}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{array}
+\usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{graphicx}
+% Compile-safe figure loader: missing experimental figures are shown as placeholders.
+\newcommand{\safeincludegraphics}[2][]{%
+  \IfFileExists{#2}{\includegraphics[#1]{#2}}{%
+    \fbox{\parbox[c][32mm][c]{0.90\linewidth}{\centering
+      Figure placeholder:\\[-1pt]\scriptsize\texttt{\detokenize{#2}}}}}}
+% Always render figures, even if the surrounding IEEE template uses draft mode.
+\setkeys{Gin}{draft=false}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{cite}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{placeins}
+\usepackage{makecell}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\newtheorem{remark}{Remark}
+
+\newcommand{\BCElogit}{\ell_{\mathrm{BCE}}^{\mathrm{logit}}}
+
+\hyphenation{op-tical net-works semi-conduc-tor positive-unlabeled}
+
+\begin{document}
+
+\title{Robust Federated Positive-Unlabeled Learning under Extreme Class-Prior Heterogeneity}
+
+\author{First~Author,~\IEEEmembership{Student Member,~IEEE,}
+        Second~Author,~\IEEEmembership{Member,~IEEE,}
+        and~Third~Author,~\IEEEmembership{Senior Member,~IEEE}%
+\thanks{This work was supported in part by XXX.}%
+\thanks{First Author and Second Author are with the School of XXX, XXX University, City, Country (e-mail: xxx@xxx.edu).}%
+\thanks{Third Author is with the Department of XXX, XXX University, City, Country.}}
+
+\markboth{IEEE Transactions on Emerging Topics in Computational Intelligence,~Vol.~XX, No.~XX, Month~2026}%
+{Author \MakeLowercase{\textit{et al.}}: Robust Federated Positive-Unlabeled Learning under Extreme Class-Prior Heterogeneity}
+
+\maketitle
+
+\begin{abstract}
+Federated positive--unlabeled (PU) learning trains a shared classifier from clients with labeled positives and unlabeled data. Large differences in client class priors and sample sizes can make local risk estimates sensitive to sampling and give disproportionate influence to individual clients. We propose FedEPPU, which combines nnPU classification with an auxiliary PU ranking task using a shared encoder and separate heads. A parameter-free hard gate disables the ranking term when fewer than one latent negative is expected in the current unlabeled mini-batch, while retaining nnPU classification. The server aggregates client models using complementary sample mass and expected negative support. Complementary mass limits the base weight of a client with a majority of the samples, while negative-support correction reduces the relative contribution of clients with insufficient expected latent-negative support, computed from the known prior and unlabeled batch size. A labeled proxy set is divided into disjoint subsets for raw-model checkpoint selection and decision-threshold calibration. Experiments on Fashion-MNIST, CIFAR-10, Chest X-ray, and KolektorSDD2 compare predictive performance and variation across communication rounds. FedEPPU obtains the highest mean AUC among the evaluated federated methods on all four datasets. Ablations show larger mean AUC reductions when ranking or complementary mass is removed; the benefit of negative-support correction is smaller and depends on the metric.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Federated learning, positive-unlabeled learning, class-prior heterogeneity, pairwise ranking, model aggregation.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Federated learning trains a shared model from data stored on multiple clients~\cite{ref_fedavg,ref_fl_survey}. In medical screening and industrial inspection, positive cases may be confirmed while many other observations remain unverified. Assigning negative labels to all unverified observations would introduce label errors. Positive--unlabeled (PU) learning addresses this setting by treating the unlabeled data as a mixture of positive and negative examples~\cite{ref_pu_survey,ref_elkan}. Risk-based methods use the positive class prior to express the supervised risk in terms of positive and unlabeled expectations~\cite{ref_pu,ref_nnpu}.
+
+Federated PU learning introduces differences in sample size and class composition across clients. FedPU has shown how information distributed across clients can support learning with partially labeled classes~\cite{ref_fedpu}. We study a binary task in which every client labels the same positive class, but the positive proportions of their unlabeled pools differ. Client priors are supplied by the experimental data construction. Estimating these priors from PU observations is a separate problem~\cite{ref_prior_estimation}.
+
+Two issues motivate this work. First, empirical PU risk estimation subtracts an estimated positive contribution from the unlabeled risk. The resulting negative-class risk can become negative with finite samples and flexible models, motivating the non-negative PU (nnPU) correction~\cite{ref_nnpu}. Pairwise risk reconstruction also becomes sensitive to estimation error when the unlabeled pool is nearly all positive, because it divides by the small negative-class prior~\cite{ref_puauc}. Correct local priors preserve the population risk identity under representative positive sampling; they do not remove finite-sample error.
+
+Second, sample size does not fully describe the information a client contributes. A large client can dominate sample-weighted aggregation even when its unlabeled pool contains few latent negatives. Work on heterogeneous federated learning has addressed local drift and differences between local and global objectives~\cite{ref_fedprox,ref_scaffold,ref_fednova,ref_feddyn}. FedDisco further uses both sample size and category-distribution discrepancy to determine aggregation weights~\cite{ref_feddisco}. In a PU setting, the server must also account for the limited negative evidence available without observed negative labels.
+
+We propose FedEPPU, which combines support-gated classification--ranking local learning with complementary-mass and negative-support aggregation. Each client trains a shared encoder with separate classification and ranking heads. The classification head always uses nnPU risk. The auxiliary ranking task is used only when the expected latent-negative count in the unlabeled mini-batch is at least one; otherwise, its contribution and effective gradient are set to zero. The server first limits the base contribution of a client holding more than half of the training samples. It then reduces the relative contribution of clients whose expected latent-negative count per mini-batch is below one. This truncated support statistic is computed from the known prior and batch composition; it does not distinguish clients once the count reaches one.
+
+FedEPPU uses labeled auxiliary data to select a global-model checkpoint and its decision threshold. One proxy subset is used for AUC-based checkpoint selection, and a disjoint subset is used for threshold selection. Test labels are reserved for evaluation. This protocol separates score-based model selection from the classification boundary and makes the additional supervision explicit.
+
+The contributions are summarized as follows:
+\begin{itemize}
+    \item We develop a federated PU learner with a shared encoder and separate classification and ranking heads. The local update combines nnPU classification with an auxiliary PU ranking loss and uses an expected-negative-count hard gate to suppress ranking when its latent-negative support is insufficient.
+    \item We introduce an aggregation rule that combines complementary sample mass with expected negative support. Complementary mass limits the base contribution of an absolute-majority client, while support correction adjusts the final relative contributions when expected latent-negative support is insufficient. The bound on base weights does not impose the same bound on the final weights.
+    \item We evaluate the method on four image datasets using five random seeds, component ablations, and sensitivity experiments. The evaluation reports both predictive performance and variation across communication rounds, with separate analyses of proxy-based threshold selection.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Federated Learning under Heterogeneous Data}
+
+FedAvg alternates local optimization with sample-size-weighted model averaging~\cite{ref_fedavg}. Differences between client distributions can lead to divergent local updates~\cite{ref_fl_survey}. FedProx adds a proximal term to restrict local deviations~\cite{ref_fedprox}, and SCAFFOLD uses control variates to correct client drift~\cite{ref_scaffold}. FedNova addresses objective inconsistency caused by unequal local computation~\cite{ref_fednova}, while FedDyn uses dynamic regularization to align local and global solutions~\cite{ref_feddyn}. MOON addresses heterogeneity through model-level contrastive representation learning~\cite{ref_moon}.
+
+Aggregation can also account for distributional differences. FedDisco combines sample size with the discrepancy between local and global category distributions~\cite{ref_feddisco}. FedEPPU uses a different pair of quantities: complementary sample mass and the expected negative support derived from each client's PU prior and unlabeled batch size. The support statistic does not measure local--global distribution distance or provide a general estimate of client reliability.
+
+Other approaches modify client participation or handle label noise. HeteRo-Select considers utility, fairness, update dynamics, and diversity in client selection, with attention to performance in later rounds~\cite{ref_heteroselect}. MRFL combines client noise detection, noise-robust training, and weighted aggregation under heterogeneous and imbalanced data~\cite{ref_mrfl}. These settings differ from ours: FedEPPU uses full client participation and assumes that labeled positives are correct, while the remaining labels are unobserved.
+
+\subsection{PU Classification and Ranking}
+
+PU methods require assumptions about the selection of labeled positives and the distribution of unlabeled examples~\cite{ref_pu_survey}. Elkan and Noto studied learning under random positive labeling~\cite{ref_elkan}. Bekker and Davis considered labeling probabilities that depend on observed attributes~\cite{ref_sar}. Our risk reconstruction assumes that labeled positives represent the positive component of each client's unlabeled distribution. Selection bias within a client is outside the present setting.
+
+Du Plessis \emph{et al.} developed a convex PU risk formulation~\cite{ref_pu}. Kiryo \emph{et al.} introduced nnPU learning to address overfitting caused by negative empirical risk estimates~\cite{ref_nnpu}. Class-prior estimation provides a separate route for settings where the mixture proportion is unknown~\cite{ref_prior_estimation}. More recent work, including Dist-PU, uses label-distribution information in deep PU learning~\cite{ref_distpu}. FedEPPU retains the nnPU classification update and uses known client priors.
+
+Pairwise losses provide another way to learn discrimination. Gao and Zhou studied conditions for AUC consistency of pairwise surrogate losses~\cite{ref_auc_consistency}. Sakai \emph{et al.} developed PU-AUC optimization and its semi-supervised extension~\cite{ref_puauc}. FedEPPU builds on these principles by adding a PU ranking task to federated local training. Sharing an encoder allows the two tasks to use a common representation~\cite{ref_multitask}. The empirical ranking risk is corrected by an absolute value; this correction is distinct from the unbiased population identity used in its derivation.
+
+\subsection{Federated Learning with PU Data}
+
+Lin \emph{et al.} proposed FedPU for clients that label only subsets of the available classes~\cite{ref_fedpu}. A class without labels on one client may have labels on another, allowing information across clients to support risk estimation. Their formulation also assumes that the server has no data. FedEPPU studies a shared binary task with heterogeneous unlabeled priors and uses labeled proxy data at the server for checkpoint and threshold selection. Our FedPU baseline is a binary adaptation; its results should be interpreted under this experimental protocol.
+
+The distinguishing feature of FedEPPU is the combination of PU classification--ranking updates with an aggregation rule based on client size and negative support. The comparison with existing work concerns this design and its observed behavior under heterogeneous PU data. Raw training samples remain on the clients, but this data-access constraint alone does not provide a formal privacy guarantee.
+
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Method Overview}
+We consider federated binary PU learning with different class priors and sample sizes among clients. Each client retains its labeled positive and unlabeled samples locally. The positive proportion of an unlabeled pool can vary from nearly zero to nearly one, so clients can provide substantially different amounts of negative evidence.
+
+Local PU risks are estimated from finite mini-batches. Extreme priors can increase sensitivity to sampling error, and repeated local updates can differ across clients. Sample-size weighting alone does not describe this difference in class evidence. The resulting global model can also vary across rounds, motivating checkpoint selection and a threshold fitted to the selected model.
+
+FedEPPU combines an nnPU classification update with an auxiliary pairwise ranking update. A local hard gate retains the ranking term only when the expected latent-negative count reaches one; nnPU classification remains active for every valid PU mini-batch. The server uses complementary sample mass and expected negative support to weight the returned models. It then selects a raw global checkpoint using proxy AUC and determines the decision threshold on a separate proxy subset.
+
+The server receives model parameters and support statistics computed from client priors and batch sizes. Private training samples are not transferred. The labeled proxy pool is disjoint from client training and test data. The implementation does not include differential privacy, secure aggregation, or encryption.
+
+\subsection{Problem Formulation}
+
+Consider a federated PU system with one server and $K$ clients. Client $k$ holds a labeled positive set $P_k$ and an unlabeled set $U_k$. The two sets are disjoint and contain $n_k^p$ and $n_k^u$ examples, respectively, with
+\begin{equation}
+n_k=n_k^p+n_k^u.
+\label{eq:client-size}
+\end{equation}
+The terms \emph{labeled} and \emph{unlabeled} describe label observability during training, whereas \emph{positive} and \emph{negative} describe the latent class. Every example in $P_k$ is known to be positive, while $U_k$ contains both latent positives and latent negatives. Its distribution satisfies
+\begin{equation}
+p_k^u(x)=\pi_k p_k^p(x)+(1-\pi_k)p_k^n(x),
+\label{eq:pu-mixture}
+\end{equation}
+where $p_k^p$ and $p_k^n$ are the positive and negative class-conditional distributions, and $\pi_k$ is the positive proportion in the unlabeled pool. The decomposition assumes that the labeled positives follow $p_k^p$, as in representative positive sampling~\cite{ref_elkan,ref_pu_survey}. Thus, $1-\pi_k$ is the latent negative proportion.
+
+The client prior $\pi_k$ is known from the data construction and is used in classification, ranking, and support computation. Values at the probability boundaries receive machine-precision protection; no prior estimator or shrinkage rule is applied.
+
+The model consists of a shared encoder $h$, a classification head $f$, and a ranking head $g$. For an input $x$, the shared feature, classification logit, and ranking score are
+\begin{equation}
+z=h(x),\qquad v=f(z),\qquad s=g(z).
+\label{eq:model-output}
+\end{equation}
+The classification head produces the final prediction, while the ranking head supplies an auxiliary relative-order constraint during training. All parameters are denoted by $\Theta$.
+
+If complete positive and negative labels were available, the local classification risk would be
+\begin{equation}
+R_k=\pi_k\mathbb E_{p_k^p}[\ell(v,1)]
++(1-\pi_k)\mathbb E_{p_k^n}[\ell(v,0)],
+\label{eq:supervised-risk}
+\end{equation}
+where binary cross-entropy with logits is
+\begin{equation}
+\begin{aligned}
+\ell(v,y)={}&-y\log\sigma(v)\\
+&-(1-y)\log\bigl(1-\sigma(v)\bigr),\\
+\sigma(v)={}&\frac{1}{1+e^{-v}}.
+\end{aligned}
+\label{eq:bce}
+\end{equation}
+Because the local training pool contains no labeled negatives, its negative expectation cannot be evaluated directly.\par\noindent
+Applying the PU mixture identity gives~\cite{ref_pu,ref_nnpu}
+\begin{equation}
+\begin{aligned}
+R_k={}&\pi_k\mathbb E_{p_k^p}[\ell(v,1)]
++\mathbb E_{p_k^u}[\ell(v,0)]\\
+&-\pi_k\mathbb E_{p_k^p}[\ell(v,0)].
+\end{aligned}
+\label{eq:pu-risk}
+\end{equation}
+Equation~\eqref{eq:pu-risk} expresses the supervised risk using PU observations. Its empirical negative component can nevertheless fall below zero. We therefore use an nnPU correction and add a ranking task to learn from pairwise comparisons.
+
+\subsection{Classification--Ranking Dual-Task Local Learning}
+
+The classification head produces the logit used for prediction, while the ranking head supplies an auxiliary pairwise loss. Both heads use a shared encoder, following the shared-representation approach to multitask learning~\cite{ref_multitask}. Inference uses the classification head only.
+
+\subsubsection{Stratified PU Sampling}
+
+Each local update requires labeled positive and unlabeled observations. Sampling directly from the combined dataset can produce batches without labeled positives. We instead sample uniformly with replacement from each pool. Given batch size $B$ and positive allocation ratio $\rho$, the batch contains
+\begin{equation}
+b_p=\lfloor\rho B\rfloor,\qquad b_u=B-b_p,
+\label{eq:batch-allocation}
+\end{equation}
+where $b_p$ and $b_u$ are the numbers of labeled positive and unlabeled draws.
+
+We fix $\rho=0.25$, giving 64 labeled positive and 192 unlabeled draws when $B=256$. This allocation ensures that both pools contribute to every update. It is a sampling hyperparameter, not an estimate of the unlabeled positive prior or a theoretically optimal allocation.
+
+\subsubsection{nnPU Classification Task}
+
+For a mini-batch with positive subset $P$ and unlabeled subset $U$, define
+\begin{align}
+L_p^+&=\frac{1}{b_p}\sum_{x\in P}\ell(f(h(x)),1),
+\label{eq:positive-positive-loss}\\
+L_p^-&=\frac{1}{b_p}\sum_{x\in P}\ell(f(h(x)),0),
+\label{eq:positive-negative-loss}\\
+L_u^-&=\frac{1}{b_u}\sum_{x\in U}\ell(f(h(x)),0).
+\label{eq:unlabeled-negative-loss}
+\end{align}
+Here, $L_p^+$ uses the positive target. The negative targets in $L_p^-$ and $L_u^-$ are used to reconstruct the negative-class risk; they do not change the observed labels.
+
+The reconstructed negative risk is
+\begin{equation}
+L_n=L_u^- -\pi_kL_p^-.
+\label{eq:negative-risk}
+\end{equation}
+The subtraction removes the estimated positive contribution from the unlabeled negative-target loss. If $L_n$ becomes negative, further minimizing it can cause overfitting. We use the branchwise nnPU training update of Kiryo \emph{et al.}~\cite{ref_nnpu}, represented by the following per-batch loss:
+\begin{equation}
+L_c=
+\begin{cases}
+\pi_kL_p^+ +L_n,&L_n\geq-\beta,\\
+-\gamma L_n,&L_n<-\beta.
+\end{cases}
+\label{eq:nnpu}
+\end{equation}
+We use $\beta=0$ and $\gamma=1$. When the estimated negative risk falls below zero, the correction branch reverses its gradient. The positive-risk term is omitted in this branch. Equation~\eqref{eq:nnpu} describes the implemented update rule; it is not a globally smooth loss.
+
+\subsubsection{PU Ranking Task and Joint Objective}
+
+The auxiliary task uses a pairwise logistic loss to encourage higher scores for positives than for negatives~\cite{ref_auc_consistency}:
+\begin{equation}
+\phi(a,b)=\log\left(1+\exp(b-a)\right),
+\label{eq:pairwise-logistic}
+\end{equation}
+where the first argument is the positive score. Pairwise PU risk reconstruction follows the mixture decomposition used in PU-AUC learning~\cite{ref_puauc}.
+
+Let $R_{PU}$, $R_{PP}$, and $R_{PN}$ denote positive--unlabeled, positive--positive, and positive--negative ranking risks. Because an unlabeled draw is positive with probability $\pi_k$ and negative with probability $1-\pi_k$,
+\begin{equation}
+R_{PU}=\pi_kR_{PP}+(1-\pi_k)R_{PN},
+\label{eq:ranking-mixture}
+\end{equation}
+and hence
+\begin{equation}
+R_{PN}=\frac{R_{PU}-\pi_kR_{PP}}{1-\pi_k}.
+\label{eq:ranking-reconstruction}
+\end{equation}
+
+Let $s_i^p$ and $s_j^u$ be ranking scores for positive and unlabeled examples in the current mini-batch. The observable empirical terms are
+\begin{align}
+L_{PU}&=\frac{1}{b_pb_u}\sum_{i=1}^{b_p}\sum_{j=1}^{b_u}
+\phi(s_i^p,s_j^u),
+\label{eq:pu-ranking-risk}\\
+L_{PP}&=\frac{1}{b_p(b_p-1)}\sum_{i\ne j}\phi(s_i^p,s_j^p).
+\label{eq:pp-ranking-risk}
+\end{align}
+Diagonal batch positions are excluded from $L_{PP}$. Since sampling uses replacement, different positions may still correspond to the same underlying positive example. The finite-batch ranking loss is
+\begin{equation}
+L_r=\left|\frac{L_{PU}-\pi_kL_{PP}}{1-\pi_k}\right|.
+\label{eq:ranking-loss}
+\end{equation}
+The absolute value makes the empirical ranking loss non-negative but introduces finite-sample bias. In particular, when the reconstructed empirical risk inside Eq.~\eqref{eq:ranking-loss} is negative, the absolute value reverses its gradient direction. This is an empirical correction for finite-batch negative risk rather than a unique consequence of the population PU identity. Near $\pi_k=1$, division by $1-\pi_k$ can still amplify estimation error. The loss is set to zero if a batch has fewer than two positive positions or no unlabeled observation. Section~\ref{sec:ranking_correction} compares this absolute correction with clamping the reconstructed risk at zero.
+
+The negative side of the ranking identity is supplied only indirectly by the unlabeled sample. For an unlabeled mini-batch of size $b_u$, client $k$ has expected latent-negative count
+\begin{equation}
+m_k=(1-\pi_k)b_u.
+\label{eq:expected-negatives}
+\end{equation}
+We use the parameter-free hard gate
+\begin{equation}
+g_k=\mathbb{1}(m_k\geq1),
+\label{eq:ranking-gate}
+\end{equation}
+and define the implemented local objective as
+\begin{equation}
+L_k=L_{c,k}+g_kL_{r,k}.
+\label{eq:joint-loss}
+\end{equation}
+When $m_k\geq1$, both tasks update the shared encoder and each head receives gradients from its own task. When $m_k<1$, the ranking contribution and its effective gradient are zero, while the nnPU classification branch continues to update the classification head and shared encoder. The threshold one represents the minimum condition that one latent negative is expected in the mini-batch; it is fixed by this count interpretation rather than selected from validation performance. The gate uses only the known prior and mini-batch composition, does not inspect latent labels, and does not assert that a particular mini-batch contains a negative example. Because $\pi_k$ and $b_u$ are fixed in the implemented protocol, $g_k$ is a constant with respect to model parameters during local optimization.
+
+At round $r$, every client uses a cosine learning-rate schedule~\cite{ref_sgdr}, without restarts:
+\begin{equation}
+\eta_r=\frac{\eta_0}{2}\left[1+\cos\left(\frac{\pi r}{R}\right)\right],
+\qquad r=0,\ldots,R-1.
+\label{eq:cosine-lr}
+\end{equation}
+The learning rate decreases over the prescribed training horizon. Each client performs the same number of local epochs, but its update count also depends on its sample size. The number of steps per local epoch is
+\begin{equation}
+S_k=\min\left\{
+\left\lceil\frac{n_k}{B}\right\rceil,
+S_{\max},
+\left\lceil\frac{n_{\mathrm{med}}}{B}\right\rceil
+\right\},
+\label{eq:local-budget}
+\end{equation}
+where $S_{\max}$ is the user-specified cap and $n_{\mathrm{med}}$ is the median client sample count. The shared cap limits additional computation on large clients, while smaller clients may take fewer steps. This distinction matters because unequal local computation can alter the effective global update~\cite{ref_fednova}.
+
+\subsection{Complementary-Mass and Negative-Support Aggregation}
+
+FedAvg uses sample count to determine aggregation weights~\cite{ref_fedavg}. Distribution-aware aggregation has also been studied~\cite{ref_feddisco}. In the present PU setting, a large unlabeled pool may contain few latent negatives. We therefore use separate factors for client quantity and expected negative support.
+
+\subsubsection{Expected Negative Support}
+
+The local hard gate in Eq.~\eqref{eq:ranking-gate} and the server correction use the same expected count $m_k$ from Eq.~\eqref{eq:expected-negatives}, but they serve different purposes. The gate determines whether the auxiliary ranking task has the minimum latent-negative support required for local use. For aggregation, we map the expected count to the bounded support statistic
+\begin{equation}
+q_k=\min\{1,m_k\}=\min\{1,(1-\pi_k)b_u\}.
+\label{eq:negative-support}
+\end{equation}
+The statistic saturates when the expected latent-negative count reaches one and decreases linearly below this level. It identifies insufficient latent-negative support rather than continuously distinguishing all clients by their negative-class information. It is derived from an expected count, not an observed negative count, and does not measure model uncertainty or overall client reliability. An expected count of one does not guarantee that a particular batch contains a negative example. Unlike the binary local gate, $q_k$ continuously reduces the aggregation contribution within the interval $0<m_k<1$. Its activation and effect on aggregation weights are examined in Section~\ref{sec:support_analysis}.
+
+If client $k$ performs $T_k$ local updates in a round, its round-average support is
+\begin{equation}
+\bar q_k=\frac{1}{T_k}\sum_{t=1}^{T_k}q_{k,t}.
+\label{eq:mean-support}
+\end{equation}
+With the fixed prior and batch composition used here, $q_{k,t}$ is constant across updates, so $\bar q_k=q_k$. Averaging records the statistic in a form that also allows varying batch composition. It does not provide additional variance reduction in the fixed-batch setting.
+
+\subsubsection{Joint Quantity and Support Weighting}
+
+Let $n_k>0$ be the sample count of participating client $k$ and $N=\sum_{k=1}^K n_k$ the total over the $K$ participating clients. A FedAvg weight $n_k/N$ approaches one when a client holds nearly all samples. At the base-weight stage, we preserve sample-proportional weights when no client has an absolute majority and limit a majority client's contribution to that of the remaining clients combined. Define
+\begin{equation}
+c_k=\min\{n_k,N-n_k\},
+\label{eq:complementary-mass}
+\end{equation}
+and normalize it as
+\begin{equation}
+a_k=\frac{c_k}{\sum_{j=1}^{K}c_j}.
+\label{eq:base-weight}
+\end{equation}
+If every client satisfies $n_k\leq N/2$, then $c_k=n_k$ for all $k$, and Eq.~\eqref{eq:base-weight} is exactly the FedAvg weighting. If client $k$ satisfies $n_k>N/2$, its effective mass is limited to the combined mass $N-n_k$ of all other clients. The other clients also sum to $N-n_k$, so normalization yields $a_k=1/2$. Consequently, for $K\geq2$ with strictly positive client sample counts, $0<a_k\leq1/2$ and $\sum_k a_k=1$. This bound follows from the complementary-mass definition and is not a tunable clipping threshold. For a single-client system, we define $a_1=1$.
+
+The base weight addresses quantity dominance but does not reflect the negative evidence in the unlabeled pool. The final aggregation weight is therefore
+\begin{equation}
+w_k=
+\begin{cases}
+\dfrac{a_k\bar q_k}{\sum_j a_j\bar q_j},
+&\sum_j a_j\bar q_j>\epsilon_a,\\[2mm]
+a_k,&\text{otherwise},
+\end{cases}
+\label{eq:final-weight}
+\end{equation}
+where $\epsilon_a$ is a numerical tolerance. Equal positive support recovers the base weights. In particular, if all clients have unit support, the correction leaves the base weights unchanged. When only some clients have support below one, their contributions decrease relative to clients with unit support. Clients in the saturated region are not distinguished by this correction, although their normalized weights may increase when other clients are downweighted. A negligible denominator triggers the fallback. A client with little negative support can still provide useful positive information, so this adjustment is not a general reliability estimate. The bound $a_k\leq1/2$ applies only to the base weights. Although $a_k\bar q_k\leq a_k$, support correction also reduces the normalization denominator, so the final $w_k$ may exceed one half. Thus, complementary mass limits dominance due to sample count at the base-weight stage; it does not guarantee that no client receives a majority of the final aggregation weight. The implementation does not apply an additional one-half cap to $w_k$.
+
+After client $k$ returns local parameters $\Theta_k^{r+1}$, the server updates
+\begin{equation}
+\Theta^{r+1}=\sum_{k=1}^{K}w_k\Theta_k^{r+1}.
+\label{eq:global-update}
+\end{equation}
+The server remains a weighted model average. The weights change the relative influence of client updates, but do not guarantee aligned update directions or lower variance.
+
+\subsection{Raw-Model Checkpoint Selection and Proxy Threshold Calibration}
+
+We select a checkpoint and a decision threshold using labeled proxy data. Model selection on finite validation data can itself overfit~\cite{ref_model_selection}, so final performance is evaluated on a separate test set. Within each class, proxy examples are assigned alternately to $D_s$ for checkpoint selection and $D_c$ for threshold calibration. Both subsets contain positive and negative examples and are disjoint from client training and test samples.
+
+At fixed evaluation intervals and in the final communication round, the server computes the current raw global model's AUC on $D_s$. Let $A_r$ be the proxy AUC of $\Theta^r$ and let $A_{\max}$ be the best value observed so far. The current raw checkpoint replaces the stored checkpoint when
+\begin{equation}
+A_r\geq A_{\max}-\delta.
+\label{eq:checkpoint-rule}
+\end{equation}
+AUC compares score ordering without fixing a decision threshold. We evaluate every five rounds and at the final round, using $\delta=0.001$. The tolerance allows a later checkpoint whose proxy AUC is close to the best observed value. This procedure does not change training and does not guarantee selection of the checkpoint with the highest test AUC.
+
+After training, the selected raw checkpoint $\Theta^*$ is restored and evaluated on $D_c$. Candidate thresholds include midpoints between consecutive distinct calibration logits and values immediately below the minimum and above the maximum. The final threshold is
+\begin{equation}
+\tau^*=\underset{\tau\in\mathcal T}{\operatorname{arg\,max}}
+\operatorname{Acc}_{D_c}(\tau).
+\label{eq:threshold}
+\end{equation}
+Ties are resolved by preferring higher recall, then a threshold closer to zero, and finally the smaller threshold. If all calibration logits are identical, a value immediately above that constant is used, predicting every calibration example as negative.
+
+For a test input $x$, the final prediction is
+\begin{equation}
+\widehat y(x)=
+\begin{cases}
++1,&f(h(x);\Theta^*)\geq\tau^*,\\
+-1,&f(h(x);\Theta^*)<\tau^*.
+\end{cases}
+\label{eq:prediction}
+\end{equation}
+Per-round reporting may calibrate a temporary threshold for the current raw global model, but that threshold does not influence local training, aggregation, or checkpoint selection. Calibration is repeated after restoring $\Theta^*$ so that the deployed model parameters and decision boundary remain matched. Proxy labels are explicitly used for checkpoint selection and calibration; test labels are used only for performance reporting.
+
+\subsection{Complete Training Procedure}
+
+Algorithm~\ref{alg:fedeppu} summarizes the complete procedure.
+\begin{algorithm}[t]
+\caption{FedEPPU Training and Inference}
+\label{alg:fedeppu}
+\begin{algorithmic}[1]
+\Require Client positive and unlabeled pools; known priors $\{\pi_k\}$; initial model; labeled proxy data; rounds $R$; local epochs $E$; batch size $B$; step limit $S_{\max}$
+\Ensure Selected raw global model $\Theta^*$ and threshold $\tau^*$
+\State Apply numerical boundary protection to client priors
+\State Compute complementary-mass base weights from client sample sizes
+\State Split proxy data by class into disjoint $D_s$ and $D_c$
+\State Initialize the global model and raw-checkpoint state
+\For{$r=0,\ldots,R-1$}
+    \State Set $\eta_r$ by Eq.~\eqref{eq:cosine-lr} and broadcast the global model
+    \For{each client $k$}
+        \For{each prescribed local update}
+            \State Sample $b_p$ positives and $b_u$ unlabeled examples
+            \State Compute nnPU loss $L_c$ by Eq.~\eqref{eq:nnpu}
+            \State Compute $m_k$ and $g_k$ by Eqs.~\eqref{eq:expected-negatives} and~\eqref{eq:ranking-gate}
+            \If{$g_k=1$}
+                \State Compute ranking loss $L_r$ by Eq.~\eqref{eq:ranking-loss}
+            \Else
+                \State Set $L_r=0$
+            \EndIf
+            \State Update the local model using $L_k=L_{c,k}+g_kL_{r,k}$
+            \State Record $q_k$ using Eq.~\eqref{eq:negative-support}
+        \EndFor
+        \State Return the local model and round-average support
+    \EndFor
+    \State Compute $w_k$ by Eq.~\eqref{eq:final-weight} and aggregate by Eq.~\eqref{eq:global-update}
+    \If{checkpoint evaluation is scheduled or $r=R-1$}
+        \State Evaluate raw $\Theta^{r+1}$ on $D_s$ and update the selected checkpoint
+    \EndIf
+\EndFor
+\State Restore the selected raw checkpoint $\Theta^*$
+\State Determine $\tau^*$ on $D_c$ using Eq.~\eqref{eq:threshold}
+\State \Return $\Theta^*$ and $\tau^*$
+\end{algorithmic}
+\end{algorithm}
+
+All clients start a round from the same global model and perform their prescribed local updates. The server averages their parameters using Eq.~\eqref{eq:final-weight}. Checkpoint and threshold selection are applied to the resulting sequence and do not feed back into local training.
+
+\subsection{Aggregation Properties and Conditional Optimization Analysis}
+\label{sec:convergence}
+
+We first establish properties of the aggregation rule, then give a conditional analysis for a simplified smooth update. The implementation uses AdamW, gradient clipping, a branchwise nnPU update, a fixed expected-negative-count gate, and an absolute-value ranking correction. Therefore, the result below is a reference bound under its stated assumptions, rather than a convergence theorem for the implemented algorithm.
+
+\subsubsection{Weight Feasibility and Update Magnitude}
+
+Non-negative base weights and support values, together with the fallback in Eq.~\eqref{eq:final-weight}, give
+\begin{equation}
+w_k\geq0,\qquad \sum_{k=1}^{K}w_k=1.
+\label{eq:weight-simplex}
+\end{equation}
+For $K\geq2$ with nonempty client datasets, Eq.~\eqref{eq:base-weight} also gives $a_k\leq1/2$, as shown above. The final weights retain nonnegativity and unit sum, but not the one-half bound. The update-magnitude inequality below uses this simplex property and does not require $w_k\leq1/2$. With fixed client sizes, priors, and batch composition, both $a_k$ and $q_k$ are fixed, so the final weights remain constant across rounds.
+
+Let $\Delta_k^r=\Theta_k^{r+1}-\Theta^r$. By convexity of the squared norm,
+\begin{equation}
+\begin{aligned}
+\|\Theta^{r+1}-\Theta^r\|^2
+&=\Big\|\sum_k w_k\Delta_k^r\Big\|^2\\
+&\leq\sum_k w_k\|\Delta_k^r\|^2.
+\end{aligned}
+\label{eq:update-bound}
+\end{equation}
+This bounds the aggregate update by the weighted client update magnitudes. It does not imply that the new weights produce a smaller update than FedAvg.
+
+\subsubsection{Conditional Smooth-Objective Bound}
+
+For this analysis only, let $\widetilde F_{c,k}$ and $\widetilde F_{r,k}$ be differentiable surrogates of the classification and ranking branches, respectively. Because $g_k$ is fixed by the known prior and batch composition, define the gated surrogate local objective $\widetilde F_k=\widetilde F_{c,k}+g_k\widetilde F_{r,k}$ and
+\begin{equation}
+\widetilde F_w(\Theta)=\sum_k w_k\widetilde F_k(\Theta).
+\label{eq:weighted-global-objective}
+\end{equation}
+Assume that $\widetilde F_w$ is globally $L$-smooth and bounded below by $\widetilde F_w^{\inf}$. Consider one synchronized stochastic-gradient step per round,
+\begin{equation}
+\Theta^{r+1}=\Theta^r-\eta_rG_r,\qquad
+G_r=\sum_k w_kg_{k,r},
+\label{eq:ideal-update}
+\end{equation}
+where each $g_{k,r}$ is evaluated at $\Theta^r$, is conditionally unbiased for $\nabla\widetilde F_k(\Theta^r)$, and has conditional variance at most $\sigma_k^2$. If client gradient errors are conditionally independent, then
+\begin{equation}
+\begin{aligned}
+\mathbb E[G_r\mid\Theta^r]&=\nabla\widetilde F_w(\Theta^r),\\
+\mathbb E[\|G_r-\nabla\widetilde F_w(\Theta^r)\|^2\mid\Theta^r]
+&\leq V_w:=\sum_k w_k^2\sigma_k^2.
+\end{aligned}
+\label{eq:local-assumptions}
+\end{equation}
+For $0<\eta_r\leq1/L$, the smoothness inequality gives the standard stochastic descent bound~\cite{ref_sgd_analysis}:
+\begin{equation}
+\begin{aligned}
+\mathbb E[\widetilde F_w(\Theta^{r+1})]
+\leq{}&\mathbb E[\widetilde F_w(\Theta^r)]\\
+&-\frac{\eta_r}{2}\mathbb E\|\nabla\widetilde F_w(\Theta^r)\|^2
++\frac{L\eta_r^2V_w}{2}.
+\end{aligned}
+\label{eq:local-convergence}
+\end{equation}
+Summing over $R$ rounds and using the lower bound yields
+\begin{equation}
+\begin{aligned}
+&\frac{\sum_{r=0}^{R-1}\eta_r\mathbb E\|\nabla\widetilde F_w(\Theta^r)\|^2}
+{\sum_{r=0}^{R-1}\eta_r}
+\\
+&\quad\leq\frac{2[\widetilde F_w(\Theta^0)-\widetilde F_w^{\inf}]}
+{\sum_{r=0}^{R-1}\eta_r}
++\frac{LV_w\sum_{r=0}^{R-1}\eta_r^2}
+{\sum_{r=0}^{R-1}\eta_r}.
+\end{aligned}
+\label{eq:global-convergence}
+\end{equation}
+A constant step size of order $R^{-1/2}$ gives an $O(R^{-1/2})$ bound on the average squared gradient norm in this simplified setting. The bound does not show that support correction lowers $V_w$: that would require information about the client gradient variances.
+
+\subsubsection{Relation to the Implemented Algorithm}
+
+The implemented clients perform $H_k=ES_k$ local updates, where $E$ is the number of local epochs. Even for plain local SGD with a common round learning rate, the expected aggregate direction is
+\begin{equation}
+\begin{aligned}
+&\mathbb E[\Theta^{r+1}-\Theta^r\mid\Theta^r]\\
+&\quad=-\eta_r\sum_k w_k\sum_{t=0}^{H_k-1}
+\mathbb E[\nabla\widetilde F_k(\Theta_{k,t}^r)\mid\Theta^r].
+\end{aligned}
+\label{eq:local-step-direction}
+\end{equation}
+Replacing the local iterates by the round's initial model gives coefficients proportional to $w_kH_k$, not simply $w_k$. Thus, fixed aggregation weights alone do not establish descent on Eq.~\eqref{eq:weighted-global-objective} when local step counts differ~\cite{ref_fednova}. The hard gate does not switch as model parameters change under the implemented fixed-prior, fixed-batch protocol; it selects either the classification surrogate or the classification--ranking surrogate for each client configuration. AdamW preconditioning, clipping, the branchwise nnPU update, and the absolute-value ranking correction still require further analysis. In particular, replacing an ordinary gradient by a generalized gradient does not justify applying a smooth descent lemma across the nnPU or absolute-value switching boundary. We therefore treat Eq.~\eqref{eq:global-convergence} as a conditional reference bound and assess the stability of the implemented algorithm empirically.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\subsubsection{Datasets and PU Data Construction}
+We evaluate FedEPPU on Fashion-MNIST~\cite{ref_fashion}, CIFAR-10~\cite{ref_cifar}, Chest X-ray~\cite{ref_chest}, and KolektorSDD2~\cite{ref_kolektor}. The first two datasets provide controlled image benchmarks; the latter two contain medical and industrial images. The multiclass benchmarks are converted to binary tasks using fixed class groups. Pneumonia is the positive class for Chest X-ray, and the presence of a surface defect defines the positive class for KolektorSDD2.
+
+Only a subset of positive training samples retains its label. The other positives and all negatives form the unlabeled pool. The proxy pool is reserved before client partitioning and is disjoint from client training and test samples. Its labeled selection and calibration subsets are used only by the server for the FedEPPU inference protocol.
+
+\subsubsection{Compared Methods}
+We compare the following methods.
+\begin{enumerate}
+    \item \textbf{Centralized PN}: centralized fully supervised training with positive and negative labels, included as a fully supervised reference. Its supervision differs from that available to PU methods because it observes true negative labels.
+    \item \textbf{Centralized nnPU}~\cite{ref_nnpu}: centralized training on all labeled positive and unlabeled samples using the nnPU risk.
+    \item \textbf{Local nnPU}: independent nnPU training at each client without server aggregation, used to evaluate the benefit of federated collaboration.
+    \item \textbf{FedAvg-nnPU}~\cite{ref_fedavg}: nnPU local training followed by standard sample-size-weighted FedAvg aggregation.
+    \item \textbf{FedProx-nnPU}~\cite{ref_fedprox}: FedAvg-nnPU augmented with a proximal regularization term to constrain local deviation.
+    \item \textbf{SCAFFOLD-nnPU}~\cite{ref_scaffold}: an nnPU variant of SCAFFOLD that uses control variates to correct client--server update drift.
+    \item \textbf{FedPU}~\cite{ref_fedpu}: an existing federated PU method adapted to our binary evaluation protocol.
+    \item \textbf{MRFL-nnPU adaptation}~\cite{ref_mrfl}: the federated mechanism of MRFL combined with the nnPU local objective.
+    \item \textbf{FedEPPU}: our complete method, comprising classification--ranking local learning, complementary-mass and negative-support-aware aggregation, proxy-based checkpoint selection, and proxy-based threshold calibration.
+\end{enumerate}
+
+Except for Centralized PN, local training uses PU observations. The comparisons use the same dataset definitions, client-partition seeds, communication-round budget, and configured local epoch and step limits. Method-specific heads, local objectives, and update rules are retained. The baseline runner uses the final trained model and a fixed zero decision threshold, without proxy access. FedEPPU uses proxy-based checkpoint and threshold selection. The overall comparison therefore measures the complete procedures, including this difference in auxiliary supervision; it does not isolate the effect of aggregation alone. Section~\ref{sec:matched_proxy} repeats the CIFAR-10 comparison with identical proxy access for all methods.
+
+\subsubsection{Implementation Details}
+Unless stated otherwise, FedEPPU uses three clients, 200 rounds, six local epochs, and batches of 256 samples. Each batch contains 64 positive and 192 unlabeled draws. The local step cap is 15, with the additional size-based limits in Eq.~\eqref{eq:local-budget}. AdamW~\cite{ref_adamw} uses an initial learning rate of $0.0015$ and weight decay of $5\times10^{-4}$. The gradient norm is clipped at 1.0. The optimizer state is reinitialized at each client's local call. Mixed precision is used for the network forward pass when enabled, while PU losses are evaluated in FP32. The learning rate follows Eq.~\eqref{eq:cosine-lr}.
+
+The server evaluates proxy AUC every five rounds and at the final round. After training, the selected raw checkpoint is restored and its threshold is fitted on the calibration subset. Default proxy sizes are 1024 for Fashion-MNIST and CIFAR-10 and 256 for Chest X-ray and KolektorSDD2. Experiments use seeds 42--46 and report the mean and sample standard deviation, reflecting variation across data partitions and stochastic training~\cite{ref_benchmark_variance}. BAcc and AUC are the primary metrics; ACC, F1, recall, and specificity provide additional information. BAcc and F1 are particularly useful when high accuracy can be obtained by predicting the majority class.
+
+
+\subsection{Overall Performance and Stability on Four Datasets}
+
+We report the final BAcc, ACC, AUC, and F1 under each method's inference protocol. Maximum test AUC and the mean AUC over the last 20 rounds describe the recorded training sequence; they are not used for model selection or early stopping. All federated runs use the prescribed 200 rounds. In the stability analyses, last-20 AUC SD denotes within-run variation over rounds 181--200, while the standard deviation accompanying a final metric denotes variation across seeds. Peak drop refers to the maximum round-wise test AUC minus the AUC at round 200, rather than the proxy-selected checkpoint.
+
+\subsubsection{Overall Results}
+Table~\ref{tab:overall_results} reports predictive performance and late-round AUC. FedEPPU is evaluated at its proxy-selected checkpoint and calibrated threshold. The federated baselines are evaluated at the final round under their fixed-threshold protocol. Centralized and local methods do not produce a common federated trajectory, so their maximum and last-20 communication-round AUC values are omitted.
+
+\begin{table*}[!t]
+\centering
+\caption{Final performance and late-stage behavior on four datasets. Results are mean $\pm$ sample standard deviation over seeds 42--46. Chest X-ray and KolektorSDD2 are real-world medical and industrial datasets, respectively. Bold values denote the best federated result. The FedEPPU rows were produced by the earlier configuration without the local ranking gate.}
+\label{tab:overall_results}
+\scriptsize
+\setlength{\tabcolsep}{3.1pt}
+\begin{tabular}{llcccccc}
+\toprule
+Dataset & Method & BAcc (\%) & ACC (\%) & AUC (\%) & F1 (\%) & Max. AUC (\%) & Last-20 AUC (\%) \\
+\midrule
+\multirow{9}{*}{Fashion-MNIST}
+& Centralized PN & 97.60$\pm$0.08 & 97.60$\pm$0.08 & 99.67$\pm$0.02 & 97.61$\pm$0.08 & -- & -- \\
+& Centralized nnPU & 95.33$\pm$0.70 & 95.33$\pm$0.70 & 98.58$\pm$0.36 & 95.48$\pm$0.63 & -- & -- \\
+& Local nnPU & 76.60$\pm$24.29 & 76.60$\pm$24.29 & 81.15$\pm$37.49 & 56.60$\pm$51.67 & -- & -- \\
+& FedAvg-nnPU & 92.36$\pm$2.60 & 92.36$\pm$2.60 & 97.58$\pm$1.00 & 92.67$\pm$2.22 & 97.90$\pm$0.74 & 97.26$\pm$1.25 \\
+& FedProx-nnPU & 92.10$\pm$3.12 & 92.10$\pm$3.12 & 97.66$\pm$0.73 & 92.45$\pm$2.55 & 97.98$\pm$0.72 & 97.05$\pm$1.73 \\
+& SCAFFOLD-nnPU & 85.39$\pm$19.80 & 85.39$\pm$19.80 & 91.36$\pm$14.79 & 88.85$\pm$12.41 & 98.28$\pm$0.42 & 96.67$\pm$2.67 \\
+& FedPU & 58.33$\pm$18.62 & 58.33$\pm$18.62 & 59.40$\pm$21.03 & 58.37$\pm$34.40 & 95.79$\pm$1.89 & 59.09$\pm$20.31 \\
+& MRFL-nnPU adaptation & 78.03$\pm$18.01 & 78.03$\pm$18.01 & 97.49$\pm$0.81 & 83.27$\pm$11.27 & 97.97$\pm$0.44 & 97.50$\pm$1.03 \\
+& \textbf{FedEPPU} & \textbf{95.86$\pm$0.92} & \textbf{95.86$\pm$0.92} & \textbf{99.08$\pm$0.40} & \textbf{95.92$\pm$0.87} & \textbf{99.22$\pm$0.37} & \textbf{99.02$\pm$0.55} \\
+\midrule
+\multirow{9}{*}{CIFAR-10}
+& Centralized PN & 87.79$\pm$0.26 & 87.79$\pm$0.26 & 94.98$\pm$0.15 & 87.30$\pm$0.53 & -- & -- \\
+& Centralized nnPU & 82.66$\pm$1.72 & 82.66$\pm$1.72 & 89.88$\pm$1.37 & 82.95$\pm$0.83 & -- & -- \\
+& Local nnPU & 70.81$\pm$13.51 & 70.81$\pm$13.51 & 81.84$\pm$11.48 & 56.70$\pm$34.92 & -- & -- \\
+& FedAvg-nnPU & 73.85$\pm$5.99 & 73.85$\pm$5.99 & 86.05$\pm$2.57 & 76.51$\pm$2.98 & 86.78$\pm$2.67 & 86.01$\pm$2.86 \\
+& FedProx-nnPU & 74.23$\pm$9.00 & 74.23$\pm$9.00 & 86.15$\pm$2.37 & 76.46$\pm$3.86 & 86.81$\pm$2.62 & 86.00$\pm$2.83 \\
+& SCAFFOLD-nnPU & 69.64$\pm$12.94 & 69.64$\pm$12.94 & 84.93$\pm$3.62 & 74.07$\pm$4.93 & 86.70$\pm$2.52 & 84.48$\pm$4.70 \\
+& FedPU & 50.00$\pm$0.00 & 50.00$\pm$0.00 & 54.42$\pm$7.15 & 66.67$\pm$0.00 & 65.77$\pm$8.90 & 54.43$\pm$6.89 \\
+& MRFL-nnPU adaptation & 60.41$\pm$14.28 & 60.41$\pm$14.28 & 74.70$\pm$22.50 & 58.02$\pm$32.97 & 85.62$\pm$2.77 & 80.71$\pm$9.66 \\
+& \textbf{FedEPPU} & \textbf{84.58$\pm$3.31} & \textbf{84.58$\pm$3.31} & \textbf{91.98$\pm$2.76} & \textbf{84.31$\pm$2.85} & \textbf{92.47$\pm$2.28} & \textbf{91.62$\pm$3.05} \\
+\midrule
+\multirow{9}{*}{Chest X-ray}
+& Centralized PN & 74.19$\pm$3.83 & 80.06$\pm$2.55 & 93.02$\pm$0.46 & 86.00$\pm$1.39 & -- & -- \\
+& Centralized nnPU & 69.99$\pm$8.37 & 76.89$\pm$5.90 & 92.43$\pm$1.29 & 84.21$\pm$3.19 & -- & -- \\
+& Local nnPU & 60.14$\pm$12.35 & 69.74$\pm$8.79 & 89.05$\pm$5.08 & 80.54$\pm$4.44 & -- & -- \\
+& FedAvg-nnPU & 63.29$\pm$12.46 & 71.83$\pm$9.02 & 87.06$\pm$7.12 & 81.48$\pm$4.73 & 88.70$\pm$6.50 & 87.04$\pm$7.12 \\
+& FedProx-nnPU & 62.95$\pm$13.58 & 71.70$\pm$9.63 & 86.57$\pm$7.85 & 81.55$\pm$4.98 & 88.74$\pm$6.43 & 86.72$\pm$7.75 \\
+& SCAFFOLD-nnPU & 70.34$\pm$9.06 & 76.22$\pm$7.24 & 86.68$\pm$7.35 & 83.26$\pm$4.56 & 88.53$\pm$7.13 & 86.66$\pm$7.38 \\
+& FedPU & 50.00$\pm$0.00 & 62.50$\pm$0.00 & 63.73$\pm$15.53 & 76.92$\pm$0.00 & 88.17$\pm$3.51 & 63.48$\pm$14.19 \\
+& MRFL-nnPU adaptation & 53.14$\pm$7.01 & 64.78$\pm$5.09 & 90.32$\pm$4.24 & 78.04$\pm$2.49 & 91.51$\pm$3.58 & 89.26$\pm$4.09 \\
+& \textbf{FedEPPU} & \textbf{80.97$\pm$5.38} & \textbf{84.58$\pm$3.85} & \textbf{91.82$\pm$1.76} & \textbf{88.62$\pm$2.40} & \textbf{93.92$\pm$0.71} & \textbf{91.98$\pm$1.45} \\
+\midrule
+\multirow{9}{*}{KolektorSDD2}
+& Centralized PN & 79.91$\pm$6.55 & 95.18$\pm$1.26 & 96.57$\pm$1.02 & 72.54$\pm$10.38 & -- & -- \\
+& Centralized nnPU & 64.64$\pm$9.66 & 92.25$\pm$2.12 & 89.29$\pm$7.08 & 42.23$\pm$25.86 & -- & -- \\
+& Local nnPU & 50.00$\pm$0.00 & 89.04$\pm$0.00 & 80.45$\pm$4.91 & 0.00$\pm$0.00 & -- & -- \\
+& FedAvg-nnPU & 50.00$\pm$0.00 & 89.04$\pm$0.00 & 77.70$\pm$9.06 & 0.00$\pm$0.00 & 82.01$\pm$1.91 & 77.57$\pm$9.10 \\
+& FedProx-nnPU & 50.00$\pm$0.00 & 89.04$\pm$0.00 & 77.69$\pm$9.08 & 0.00$\pm$0.00 & 82.01$\pm$1.91 & 77.57$\pm$9.10 \\
+& SCAFFOLD-nnPU & 54.68$\pm$7.44 & 90.00$\pm$1.49 & 80.33$\pm$12.91 & 14.52$\pm$22.12 & 85.64$\pm$4.72 & 80.58$\pm$12.72 \\
+& FedPU & 50.00$\pm$0.00 & 10.96$\pm$0.00 & 56.58$\pm$9.11 & 19.75$\pm$0.00 & 75.63$\pm$12.68 & 57.25$\pm$9.33 \\
+& MRFL-nnPU adaptation & 50.00$\pm$0.00 & 89.04$\pm$0.00 & 79.56$\pm$4.98 & 0.00$\pm$0.00 & 81.98$\pm$1.87 & 79.83$\pm$4.14 \\
+& \textbf{FedEPPU} & \textbf{87.24$\pm$2.62} & \textbf{96.16$\pm$0.30} & \textbf{96.43$\pm$0.96} & \textbf{81.19$\pm$0.91} & \textbf{97.45$\pm$0.62} & \textbf{95.74$\pm$1.28} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+FedEPPU has the highest mean federated BAcc and AUC on both benchmarks. On Fashion-MNIST, BAcc is 95.86\% and AUC is 99.08\%, exceeding the strongest corresponding federated baseline by 3.50 and 1.42 percentage points. On CIFAR-10, the corresponding values are 84.58\% and 91.98\%, with gains of 10.35 and 5.83 points. These differences describe the complete training and inference procedures.
+
+On Chest X-ray, FedEPPU obtains 80.97\% BAcc, 91.82\% AUC, and 88.62\% F1. On KolektorSDD2, the values are 87.24\%, 96.43\%, and 81.19\%, respectively. Several KolektorSDD2 baselines obtain 89.04\% ACC with 50\% BAcc and zero F1, consistent with predicting only the negative majority class. FedEPPU detects positive defects more effectively under the evaluated inference protocol.
+
+FedEPPU also has the highest mean last-20-round AUC among the federated methods on all four datasets. The differences between maximum and last-20 AUC range from 0.20 to 1.94 percentage points. This measures how much of the peak performance is retained, but does not by itself measure round-to-round fluctuation.
+
+\subsubsection{Round-Wise Behavior}
+Figure~\ref{fig:cifar10_federated_trajectories} shows the round-wise ACC, AUC, and F1 of the federated methods on CIFAR-10 for each of seeds 42--46. All federated methods complete 200 rounds. Faint traces show the observed per-round values, and bold traces show centered five-round moving averages.
+
+
+\begin{figure*}[!t]
+\centering
+\captionsetup[subfloat]{font=footnotesize}
+\subfloat[Seed 42]{%
+    \safeincludegraphics[width=0.48\textwidth]{cifar10_federated_seed42.png}%
+    \label{fig:cifar10_seed42}}
+\hfill
+\subfloat[Seed 43]{%
+    \safeincludegraphics[width=0.48\textwidth]{cifar10_federated_seed43.png}%
+    \label{fig:cifar10_seed43}}
+
+\vspace{1mm}
+\subfloat[Seed 44]{%
+    \safeincludegraphics[width=0.48\textwidth]{cifar10_federated_seed44.png}%
+    \label{fig:cifar10_seed44}}
+\hfill
+\subfloat[Seed 45]{%
+    \safeincludegraphics[width=0.48\textwidth]{cifar10_federated_seed45.png}%
+    \label{fig:cifar10_seed45}}
+
+\vspace{1mm}
+\subfloat[Seed 46]{%
+    \safeincludegraphics[width=0.48\textwidth]{cifar10_federated_seed46.png}%
+    \label{fig:cifar10_seed46}}
+\caption{Round-wise ACC, AUC, and F1 of federated methods on CIFAR-10 for seeds 42--46. Each subfigure contains the trajectories of FedAvg-nnPU, FedProx-nnPU, SCAFFOLD-nnPU, FedPU, MRFL-nnPU, and FedEPPU. Centralized and local methods are omitted because their optimization epochs do not represent federated communication rounds. Faint traces show observed per-round values, and bold traces show centered five-round moving averages.}
+\label{fig:cifar10_federated_trajectories}
+\end{figure*}
+
+Figure~\ref{fig:cifar10_federated_trajectories} allows comparison of individual runs rather than only seed-averaged curves. FedEPPU generally maintains higher late-round ACC, AUC, and F1 than the baselines shown. Together with Table~\ref{tab:overall_results}, the trajectories describe both the achieved performance and its evolution during training. They do not establish a uniform stability advantage for every seed or metric.
+
+\subsection{Matched-Proxy Comparison on CIFAR-10}
+\label{sec:matched_proxy}
+The comparison in Table~\ref{tab:overall_results} evaluates complete procedures: the baselines use the final model and a zero threshold, whereas FedEPPU uses proxy-based checkpoint selection and threshold calibration. To examine whether FedEPPU remains best when the decision threshold is not fixed at zero, we repeat the CIFAR-10 comparison with identical proxy access for every method. Within each seed, all methods share the same partition and the same proxy subsets $D_s$ (checkpoint selection) and $D_c$ (threshold calibration), which are disjoint from client training and test data. All methods use the same evaluation interval (five rounds plus the final round), the same tolerance $\delta=0.001$ in Eq.~\eqref{eq:checkpoint-rule}, the same tie-break rule, and the same accuracy criterion on $D_c$ in Eq.~\eqref{eq:threshold}. The two protocols answer different questions: the complete-procedure comparison measures each system under its own deployment protocol, whereas the matched-proxy comparison asks whether the differences persist when every method uses a dynamic, proxy-calibrated threshold.
+
+Because proxy-based checkpoint selection can change AUC even though thresholding cannot, we report both the round-200 raw AUC and the AUC of the proxy-selected checkpoint, together with calibrated BAcc and F1. For reference, Table~\ref{tab:matched_proxy} also lists the zero-threshold BAcc reported in Table~\ref{tab:overall_results}; the zero-threshold BAcc of FedEPPU was not recorded for the matched-proxy runs, and its zero-threshold analysis is given separately in Table~\ref{tab:threshold}.
+
+\begin{table*}[!t]
+\centering
+\caption{Matched-proxy comparison on CIFAR-10. All methods share the same $D_s$ and $D_c$, evaluation interval, tolerance, and tie-break rule. Zero-thr.\ BAcc is the fixed-zero-threshold BAcc from Table~\ref{tab:overall_results}; the other columns use the proxy-selected checkpoint and the $D_c$-calibrated threshold. Results are mean $\pm$ sample SD over seeds 42--46. Bold: best federated result.}
+\label{tab:matched_proxy}
+\scriptsize
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lccccc}
+\toprule
+Method
+& \makecell{Round-200\\AUC (\%)}
+& \makecell{Selected\\AUC (\%)}
+& \makecell{Zero-thr.\\BAcc (\%)}
+& \makecell{Calib.\\BAcc (\%)}
+& \makecell{Calib.\\F1 (\%)} \\
+\midrule
+Centralized PN & 94.98$\pm$0.15 & 94.98$\pm$0.15 & 87.79$\pm$0.26 & 87.65$\pm$0.21 & 86.91$\pm$0.29 \\
+Centralized nnPU & 90.12$\pm$0.70 & 91.06$\pm$0.20 & 82.66$\pm$1.72 & 83.43$\pm$1.02 & 83.46$\pm$0.59 \\
+Local nnPU & 81.81$\pm$11.48 & 82.04$\pm$11.64 & 70.81$\pm$13.51 & 75.31$\pm$9.69 & 75.77$\pm$7.07 \\
+\midrule
+FedAvg-nnPU & 85.97$\pm$2.74 & 86.46$\pm$2.67 & 73.85$\pm$5.99 & 79.29$\pm$2.37 & 78.40$\pm$2.88 \\
+FedProx-nnPU & 85.40$\pm$3.55 & 86.56$\pm$2.65 & 74.23$\pm$9.00 & 79.05$\pm$1.70 & 77.55$\pm$3.14 \\
+SCAFFOLD-nnPU & 84.00$\pm$5.53 & 86.44$\pm$2.11 & 69.64$\pm$12.94 & 79.50$\pm$1.99 & 78.08$\pm$1.84 \\
+FedPU & 56.75$\pm$9.43 & 56.85$\pm$9.51 & 50.00$\pm$0.00 & 54.77$\pm$6.67 & 24.73$\pm$33.90 \\
+MRFL-nnPU adaptation & 75.58$\pm$19.37 & 85.02$\pm$2.24 & 60.41$\pm$14.28 & 78.25$\pm$1.96 & 76.48$\pm$1.96 \\
+\textbf{FedEPPU} & \textbf{91.64$\pm$3.00} & \textbf{92.31$\pm$2.43} & -- & \textbf{85.00$\pm$2.90} & \textbf{84.17$\pm$3.24} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+A proxy-calibrated, non-zero threshold improves every federated PU baseline relative to its zero-threshold BAcc: from 73.85\% to 79.29\% for FedAvg-nnPU, from 74.23\% to 79.05\% for FedProx-nnPU, from 69.64\% to 79.50\% for SCAFFOLD-nnPU, from 60.41\% to 78.25\% for MRFL-nnPU, and from 50.00\% to 54.77\% for FedPU. The calibrated thresholds are not zero in any run of the matched-proxy experiment; they range from $-4.05$ to $1.33$ across methods and seeds, and the mean FedEPPU threshold is $-1.31$. The zero-threshold column is taken from Table~\ref{tab:overall_results} (the original baseline runs), whereas the other columns come from the matched-proxy runs, so differences between these columns also include run-to-run variation. FedEPPU's own zero-threshold result is analyzed in Table~\ref{tab:threshold}. Proxy checkpoint selection also matters for AUC: for MRFL-nnPU, the round-200 AUC of 75.58\% increases to 85.02\% at the selected checkpoint. Part of the BAcc and F1 gap in Table~\ref{tab:overall_results} is therefore attributable to the difference in proxy supervision rather than to the local objective or aggregation.
+
+FedEPPU remains the best federated method after this correction. Against the strongest matched baseline in each column, FedEPPU is higher by 5.50 points in calibrated BAcc (SCAFFOLD-nnPU), 5.75 points in selected AUC (FedProx-nnPU), 5.77 points in calibrated F1 (FedAvg-nnPU), and 5.67 points in round-200 AUC (FedAvg-nnPU). The BAcc difference is about half of the 10.35-point difference under the complete-procedure comparison, whereas the AUC difference (5.75 versus 5.83 points) is essentially unchanged. In four of the five seeds, FedEPPU has higher calibrated BAcc than each of FedAvg-nnPU, FedProx-nnPU, SCAFFOLD-nnPU, and MRFL-nnPU. FedPU remains near chance level in this binary adaptation under both protocols. These results indicate that, with a dynamic non-zero threshold available to all methods, the advantage of FedEPPU is not explained by proxy access alone.
+
+The mean differences are comparable in size to the across-seed standard deviations, and the experiment uses five seeds on a single dataset, so we do not claim statistical significance or the same effect size on the other datasets. The matched-proxy FedEPPU runs use the local hard ranking gate of Section~\ref{sec:support_analysis}, so their means (85.00\% BAcc, 92.31\% AUC) correspond to that configuration rather than to Table~\ref{tab:overall_results}. FedEPPU's selected checkpoint also falls at different rounds across seeds (round 10 to round 180), so the comparison does not equalize the number of effective training rounds.
+
+\subsection{Class-Prior Heterogeneity}
+On CIFAR-10, we compare FedAvg-nnPU and FedEPPU at Dirichlet concentrations of 0.1, 0.5, and 1.0. Smaller concentrations tend to produce more uneven class allocations. The realized priors and sample counts also vary, so this experiment changes both aspects of the client partition rather than isolating class priors perfectly. Table~\ref{tab:prior_heterogeneity} reports their observed ranges.
+
+\begin{table}[!t]
+\centering
+\caption{Performance under different Dirichlet concentrations on CIFAR-10. The realized client-prior and client sample-count ranges, shared by both methods, are given above each pair of rows. The FedEPPU rows were produced by the earlier configuration without the local ranking gate.}
+\label{tab:prior_heterogeneity}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccc}
+\toprule
+Method & ACC (\%) & AUC (\%) & F1 (\%) \\
+\midrule
+\multicolumn{4}{l}{\textit{$\alpha=0.1$: prior $\in[0.0009,0.9995]$, size $\in[364,44826]$}} \\
+FedAvg-nnPU & 67.24$\pm$14.60 & 84.41$\pm$5.31 & 73.88$\pm$6.24 \\
+\textbf{FedEPPU} & \textbf{84.63$\pm$3.36} & \textbf{92.09$\pm$2.86} & \textbf{84.48$\pm$3.01} \\
+\midrule
+\multicolumn{4}{l}{\textit{$\alpha=0.5$: prior $\in[0.0307,0.9991]$, size $\in[1838,33691]$}} \\
+FedAvg-nnPU & 78.44$\pm$3.84 & 87.87$\pm$1.52 & 79.36$\pm$1.88 \\
+\textbf{FedEPPU} & \textbf{83.46$\pm$2.27} & \textbf{90.93$\pm$2.09} & \textbf{82.91$\pm$2.69} \\
+\midrule
+\multicolumn{4}{l}{\textit{$\alpha=1.0$: prior $\in[0.1242,0.9504]$, size $\in[2607,32461]$}} \\
+FedAvg-nnPU & 80.68$\pm$1.76 & 89.20$\pm$0.68 & 81.14$\pm$0.57 \\
+\textbf{FedEPPU} & \textbf{81.72$\pm$1.43} & \textbf{90.02$\pm$1.39} & \textbf{81.38$\pm$1.73} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+FedEPPU has higher mean ACC, AUC, and F1 at each concentration. At $\alpha=0.1$, the differences are 17.39, 7.68, and 10.60 percentage points. The mean differences decrease as $\alpha$ increases. Across-seed standard deviations are lower for all three metrics at $\alpha=0.1$, but not for every metric at the other concentrations. These results support a larger observed performance gain under the most heterogeneous setting tested.
+
+\subsection{Ablation Study on CIFAR-10}
+The component ablations use matched partition and training seeds, the same model initialization protocol, and the same training budget. They retain FedEPPU's checkpoint and threshold procedures. The threshold experiment explicitly changes only the decision rule. All ablation results, grouped by purpose, are collected in Table~\ref{tab:ablation}: Group~(A) contains the component ablations, Group~(B) the local-gate and server-support variants, and Group~(C) the ranking-risk corrections. Groups~(B) and~(C) use the local hard gate and strict deterministic execution; Group~(A) comes from earlier runs without the formal gate.
+
+\begin{table*}[!t]
+\centering
+\caption{Ablation results on CIFAR-10 (mean $\pm$ sample SD over seeds 42--46). (A) Component ablation from the earlier runs without the local gate. (B) Local ranking gate and server support correction under strict deterministic execution. (C) Finite-batch ranking-risk correction, with local gate and server support enabled. ACC equals BAcc on the balanced test set. Bold: best within each group; ``--'' denotes a quantity not reported for that group.}
+\label{tab:ablation}
+\scriptsize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{llcccccc}
+\toprule
+Group & Variant & BAcc (\%) & F1 (\%) & AUC (\%) & Last-20 AUC (\%) & Late AUC SD & Peak drop \\
+\midrule
+\multirow{5}{*}{(A) Components}
+& \makecell[l]{Earlier full configuration\\without local gate} & 84.51$\pm$3.30 & \textbf{84.47$\pm$3.01} & \textbf{92.07$\pm$2.85} & \textbf{91.70$\pm$3.12} & \textbf{0.03$\pm$0.03} & 0.83 \\
+& w/o PU ranking & 82.13$\pm$2.26 & 80.97$\pm$2.72 & 89.29$\pm$1.81 & 88.07$\pm$2.77 & 0.18$\pm$0.22 & 1.56 \\
+& w/o complementary mass & 83.00$\pm$3.23 & 82.30$\pm$2.95 & 90.33$\pm$2.84 & 89.07$\pm$3.96 & 0.08$\pm$0.06 & 1.61 \\
+& w/o negative-support corr. & \textbf{84.54$\pm$3.00} & 84.00$\pm$2.80 & 91.58$\pm$2.83 & 91.43$\pm$2.97 & \textbf{0.03$\pm$0.02} & \textbf{0.28} \\
+& FedAvg aggregation & 81.95$\pm$4.17 & 81.13$\pm$4.84 & 89.58$\pm$3.38 & 89.04$\pm$3.95 & 0.06$\pm$0.02 & 1.38 \\
+\midrule
+\multirow{4}{*}{(B) Support}
+& No support & 84.51$\pm$2.92 & -- & 91.78$\pm$2.88 & -- & -- & -- \\
+& Local gate only & 84.03$\pm$3.28 & -- & 91.44$\pm$2.97 & -- & -- & -- \\
+& Server support only & 84.35$\pm$3.29 & 83.51$\pm$3.63 & 91.75$\pm$2.74 & -- & -- & -- \\
+& Local gate + server support & \textbf{85.00$\pm$2.90} & \textbf{84.17$\pm$3.24} & \textbf{92.31$\pm$2.43} & -- & -- & -- \\
+\midrule
+\multirow{2}{*}{(C) Ranking corr.}
+& Absolute (default) & \textbf{85.00$\pm$2.90} & \textbf{84.17$\pm$3.24} & \textbf{92.31$\pm$2.43} & \textbf{91.67$\pm$2.99} & -- & -- \\
+& Clamp & 84.49$\pm$3.19 & 83.73$\pm$3.62 & 91.98$\pm$2.86 & 91.16$\pm$3.64 & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsubsection{Performance and Stability Contributions of Individual Components}
+We evaluate five variants: the complete method; removal of PU ranking; removal of complementary mass; removal of negative-support correction; and replacement of the complete aggregation rule with standard FedAvg. Results are reported in Group~(A) of Table~\ref{tab:ablation} and Fig.~\ref{fig:component_ablation}.
+
+Removing PU ranking reduces mean ACC, F1, and AUC by 2.38, 3.50, and 2.78 percentage points. Last-20 AUC SD increases from 0.03 to 0.18. Removing complementary mass reduces mean AUC by 1.74 points, while replacing both aggregation corrections with FedAvg reduces it by 2.49 points. These paired settings support a contribution from ranking and complementary mass under the tested partitions.
+
+Removing negative-support correction gives similar ACC/BAcc (84.54\% versus 84.51\%) and the same rounded mean late AUC SD of 0.03. Its peak drop is smaller (0.28 versus 0.83), while mean AUC and F1 are lower by 0.49 and 0.47 points. Thus, the correction has a modest average discrimination benefit but does not improve every measure of stability. Figure~\ref{fig:component_ablation} provides the corresponding trajectories. These summaries do not establish statistical significance or a uniform benefit across seeds.
+
+\begin{figure*}[!t]
+\centering
+\safeincludegraphics[width=0.78\textwidth]{component_ablation.png}
+\caption{Round-wise ACC, AUC, and F1 for the CIFAR-10 component ablations. Curves and shaded regions show the mean and sample standard deviation over five seeds.}
+\label{fig:component_ablation}
+\end{figure*}
+
+
+\subsubsection{Activation and Contribution of Negative-Support Correction}
+\label{sec:support_analysis}
+We first examine whether the saturated support statistic changes the aggregation weights in practice. With the default unlabeled batch size $b_u=192$, $q_k=1$ whenever $\pi_k\leq 1-1/192\approx0.99479$. In the five CIFAR-10 diagnostic runs with seeds 42--46 and three clients per run, 12 of the 15 client configurations have unit support. The remaining three occur in seeds 43, 44, and 45. This 80\% saturation rate describes these client configurations, not the fraction of training batches or a rate shared by all datasets.
+
+In the three non-saturated configurations, the expected negative count $m_k$ is 0.087 (seed 43, client 3), 0.270 (seed 44, client 1), and 0.235 (seed 45, client 3), and the aggregation weight falls from the base 47.06\%, 49.23\%, and 46.29\% to 7.15\%, 20.75\%, and 16.84\%, respectively. This shows that saturation for most clients does not make the correction inactive. All clients in seeds 42 and 46 have unit support, so their base weights remain unchanged. These observations confirm the intended scope of the statistic as a correction for insufficient expected latent-negative support, rather than a general ranking of client quality. The seed-45 weights also illustrate the distinction between the base and final contributions: $\mathbf a\approx(0.5000,0.0371,0.4629)$ becomes $\mathbf w\approx(0.7741,0.0575,0.1684)$ after support correction. The first client's final weight exceeds one half, although its base weight satisfies the bound. This is a consequence of support normalization, not a violation of the complementary-mass property.
+
+We validate the local gate separately under strict deterministic execution. The ungated version uses $L_c+L_r$, whereas the gated version uses Eq.~\eqref{eq:joint-loss}; all other training, aggregation, and inference settings are held fixed. Group~B of Table~\ref{tab:ablation} (Server support only versus Local gate + server support) reports the performance difference. In the support-deficient client records, the gate reduces the mean effective ranking-gradient norm from 640.51 to 0.00, the non-finite gradient fraction from 9.90\% to 1.29\%, and the clipping fraction from 94.65\% to 51.95\%.
+
+The gate is inactive in seeds 42 and 46 because all clients meet the minimum expected-negative condition; these runs remain unchanged. It activates for an extreme-prior client in seeds 43, 44, and 45. In those records, it removes the unsupported ranking gradient while preserving nnPU classification. Across the five seeds, mean BAcc, F1, and AUC increase by 0.65, 0.66, and 0.56 percentage points, respectively. These results support the gate as a targeted safeguard for the evaluated extreme-prior setting; they do not establish a universal improvement for every client distribution.
+
+We next distinguish the local and server uses of expected negative support through four strictly matched variants. No support uses ungated ranking and complementary-mass aggregation without server support correction. Local only enables the hard ranking gate but omits server correction. Global only retains ungated ranking and enables server correction. Local + global enables both mechanisms and corresponds to the complete support configuration. All variants retain complementary-mass base weights and use identical partitions, initialization, training budgets, and proxy inference procedures under strict deterministic execution. Each setting runs for 200 rounds with seeds 42--46. The results in Group~(B) of Table~\ref{tab:ablation} are reported separately from Group~(A) because those runs predate the formal local gate.
+
+Neither mechanism improves the five-seed mean when used alone, whereas their joint use gives the highest mean result. Paired by seed, Local gate + server support improves BAcc/AUC by 0.65/0.56 points over Server support only, by 0.97/0.88 points over Local gate only, and by 0.49/0.54 points over No support. In every comparison, seeds 43--45 improve and the non-triggered seeds 42 and 46 remain unchanged.
+
+The pattern is consistent with the mechanisms' distinct roles: the local gate prevents an unsupported ranking gradient from entering the client update, while server support reduces that client's contribution during aggregation. The five-seed 95\% descriptive intervals cross zero (for AUC, approximately $[-0.18,1.31]$ points versus Server support only and $[-0.20,1.95]$ versus Local gate only), so we report a positive direction in the three triggered seeds rather than statistical significance or a universal interaction effect.
+
+\subsubsection{Contribution of Threshold Calibration}
+We evaluate the calibrated and zero thresholds on the same checkpoints and test samples. Table~\ref{tab:threshold} reports aggregate and individual-seed results; Fig.~\ref{fig:threshold_ablation} shows seeds 43 and 44, which have the largest BAcc differences. Both settings obtain 91.98$\pm$2.76\% AUC because threshold selection does not change score ordering.
+
+\begin{table*}[!t]
+\centering
+\caption{Proxy-calibrated versus fixed zero threshold on CIFAR-10. (a) Aggregate results over seeds 42--46; ACC equals BAcc and is omitted; the last row is the paired difference (calibrated minus zero). (b) Per-seed calibrated threshold $\tau^*$ and BAcc (\%). These FedEPPU results were produced by the earlier configuration without the local ranking gate.}
+\label{tab:threshold}
+\scriptsize
+\begin{minipage}[t]{0.57\textwidth}
+\centering
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccc}
+\toprule
+\multicolumn{5}{c}{(a) Aggregate} \\
+\midrule
+Setting & BAcc (\%) & F1 (\%) & Recall (\%) & Spec. (\%) \\
+\midrule
+Proxy-calibrated & \textbf{84.58$\pm$3.31} & \textbf{84.31$\pm$2.85} & \textbf{82.51$\pm$3.28} & 86.65$\pm$7.20 \\
+Fixed zero & 77.60$\pm$7.86 & 72.43$\pm$14.53 & 65.00$\pm$23.20 & \textbf{90.20$\pm$13.51} \\
+Difference & +6.98$\pm$8.60 & +11.88$\pm$15.71 & +17.51$\pm$24.27 & $-$3.55$\pm$10.33 \\
+\bottomrule
+\end{tabular}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.40\textwidth}
+\centering
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{ccccc}
+\toprule
+\multicolumn{5}{c}{(b) Per seed} \\
+\midrule
+Seed & $\tau^*$ & Calibrated & Zero & Change \\
+\midrule
+42 & $-$1.57 & 86.13 & 84.39 & +1.74 \\
+43 & $-$3.40 & 84.69 & 72.84 & +11.85 \\
+44 & $-$5.69 & 87.26 & 67.44 & +19.82 \\
+45 & +0.29 & 78.89 & 77.07 & +1.82 \\
+46 & +0.41 & 85.93 & 86.25 & $-$0.32 \\
+\midrule
+Mean & $-$1.99 & 84.58 & 77.60 & +6.98 \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\end{table*}
+
+Calibration raises mean ACC/BAcc by 6.98 points, F1 by 11.88 points, and recall by 17.51 points, while specificity decreases by 3.55 points. The reported mean last-20-round BAcc standard deviation decreases from 0.60 to 0.15. Seeds 43 and 44 have calibrated thresholds of $-3.40$ and $-5.69$; the zero threshold rejects more positives and reduces BAcc by 11.85 and 19.82 points. Seeds 45 and 46 have thresholds closer to zero and smaller differences. For seed 46, the zero threshold gives a 0.32-point higher BAcc. Calibration therefore improves the five-seed average but is not better in every run.
+
+\begin{figure*}[!t]
+\centering
+\subfloat[Seed 43]{%
+    \safeincludegraphics[width=0.48\textwidth]{threshold_seed43.png}}
+\hfill
+\subfloat[Seed 44]{%
+    \safeincludegraphics[width=0.48\textwidth]{threshold_seed44.png}}
+\caption{Round-wise ACC, AUC, and F1 under proxy-calibrated and fixed zero thresholds for seeds 43 and 44, the two seeds with the largest calibration effect. The two AUC curves overlap because threshold selection does not alter score ordering.}
+\label{fig:threshold_ablation}
+\end{figure*}
+
+\subsubsection{Correction of Negative Reconstructed Ranking Risk}
+\label{sec:ranking_correction}
+
+We examine whether reversing the gradient of a negative reconstructed ranking risk degrades training. The implemented Absolute correction is $L_r^{\mathrm{abs}}=|\widehat R_{PN}|$, whereas the Clamp alternative is $L_r^{\mathrm{clamp}}=\max(0,\widehat R_{PN})$. Clamp therefore supplies zero gradient, rather than a reversed gradient, when $\widehat R_{PN}<0$. The two variants use identical local hard gating, server support correction, complementary-mass aggregation, client partitions, initialization, training budgets, and proxy inference procedures. Both are run under strict deterministic execution for seeds 42--46, giving ten tasks in total. Results are shown in Group~(C) of Table~\ref{tab:ablation}.
+
+Relative to Absolute, Clamp lowers BAcc in all five seeds by 0.51 percentage points on average and lowers mean AUC by 0.34 points, with AUC decreasing in four seeds and increasing in one. The mean effective ranking-gradient norm is 5.49 for Absolute and 52.50 for Clamp, while the non-finite joint-gradient fractions are approximately 2.90\% and 6.44\%, respectively. Because the corrections produce different subsequent model trajectories, their negative-risk frequencies are not a batchwise causal comparison. Clamp does not improve predictive performance or gradient stability in this experiment, so we retain Absolute as an empirical finite-batch correction; the comparison does not establish its theoretical optimality or universal superiority.
+
+\subsection{Sensitivity Analysis}
+We vary the maximum number of local updates, the positive allocation ratio in each PU mini-batch, the number of clients, and the proxy-set size on CIFAR-10. All other settings are held fixed for each experiment. The four experiments are summarized in Table~\ref{tab:sensitivity}.
+
+\begin{table*}[!t]
+\centering
+\caption{Sensitivity analysis on CIFAR-10 (mean $\pm$ sample SD over seeds 42--46). Each factor is a separate run set, so its default setting (marked $^{\ast}$) differs slightly across factors. ``BAcc'' for the client-count rows is ACC, which equals BAcc on the balanced test set. These runs were produced by the earlier configuration without the local ranking gate. ``--'' denotes a quantity not reported for that factor.}
+\label{tab:sensitivity}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{llcccc}
+\toprule
+Factor & Setting & BAcc (\%) & AUC (\%) & F1 (\%) & \makecell{Last-20\\AUC SD} \\
+\midrule
+\multirow{4}{*}{Local steps}
+& 5  & 83.98$\pm$3.19 & 91.77$\pm$2.38 & -- & 0.067 \\
+& 10 & 84.20$\pm$3.55 & 91.85$\pm$3.11 & -- & 0.053 \\
+& 15$^{\ast}$ & 84.58$\pm$3.31 & 91.98$\pm$2.76 & -- & \textbf{0.036} \\
+& 20 & 84.81$\pm$3.70 & 91.96$\pm$3.33 & -- & 0.045 \\
+\midrule
+\multirow{4}{*}{$\rho$ (P/U)}
+& 0.125 (32/224)  & 84.04$\pm$3.99 & 91.84$\pm$2.70 & 82.59$\pm$5.47 & 0.052 \\
+& 0.25$^{\ast}$ (64/192) & 84.63$\pm$3.36 & 92.09$\pm$2.86 & 84.48$\pm$3.01 & 0.034 \\
+& 0.375 (96/160) & 84.39$\pm$3.31 & 91.71$\pm$2.92 & 83.52$\pm$3.94 & 0.046 \\
+& 0.5 (128/128)  & 84.54$\pm$2.55 & 91.93$\pm$2.73 & 83.87$\pm$3.12 & \textbf{0.031} \\
+\midrule
+\multirow{4}{*}{Clients}
+& 3$^{\ast}$ & 84.61$\pm$3.39 & 92.04$\pm$2.95 & 84.10$\pm$3.83 & 0.045 \\
+& 6  & 80.64$\pm$2.46 & 88.35$\pm$2.67 & 79.96$\pm$2.29 & 0.049 \\
+& 9  & 83.07$\pm$0.94 & 90.62$\pm$1.07 & 82.63$\pm$1.25 & \textbf{0.034} \\
+& 12 & 83.31$\pm$0.94 & 90.63$\pm$0.96 & 82.25$\pm$1.62 & 0.039 \\
+\midrule
+\multirow{4}{*}{Proxy size}
+& 128  & 82.30$\pm$2.98 & 90.85$\pm$2.99 & -- & -- \\
+& 256  & 83.98$\pm$3.68 & 91.80$\pm$2.52 & -- & -- \\
+& 512  & 84.39$\pm$3.38 & 91.85$\pm$2.71 & -- & -- \\
+& 1024$^{\ast}$ & 84.51$\pm$3.30 & 92.07$\pm$2.85 & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsubsection{Maximum Number of Local Updates}
+The maximum number of updates per local epoch is set to 5, 10, 15, or 20. Each setting is evaluated over seeds 42--46 for 200 rounds. Final AUC and BAcc are obtained from the proxy-selected checkpoint, and the within-run AUC standard deviation over the last 20 rounds measures late-stage fluctuation (Table~\ref{tab:sensitivity}).
+
+Increasing the step cap from 5 to 15 changes mean AUC from 91.77\% to 91.98\% and reduces last-20 AUC SD from 0.067 to 0.036. At 20 steps, mean AUC is 91.96\%, with greater late-round variation and a larger peak drop (1.14 versus 0.86 points at 15 steps). An additional 30-step run group reports 92.07$\pm$2.75\% AUC and 84.83$\pm$3.27\% BAcc, with a 1.73-point peak drop. The mean AUC differences are small relative to the across-seed standard deviations. The 15-step default offers a practical balance between computation and the observed late-round variation; these results do not establish it as a universal optimum.
+
+\subsubsection{Positive Allocation Ratio in PU Mini-Batches}
+\label{sec:rho_sensitivity}
+
+We examine the positive allocation ratio used by the stratified PU sampler. The ratio is varied over $\rho\in\{0.125,0.25,0.375,0.5\}$ while the mini-batch size remains 256. These settings correspond to 32P/224U, 64P/192U, 96P/160U, and 128P/128U draws, respectively. Client partitions, the initialization protocol, 200 communication rounds, six local epochs, the 15-step cap, aggregation, checkpoint selection, and threshold calibration are held fixed. Table~\ref{tab:sensitivity} reports the mean and sample standard deviation over seeds 42--46.
+
+Increasing $\rho$ from 0.125 to 0.25 raises mean AUC from 91.84\% to 92.09\% and mean F1 from 82.59\% to 84.48\%, while the mean last-20 AUC SD decreases from 0.052 to 0.034 points. With only 32 labeled-positive draws per batch, the positive side of the classification and ranking objectives receives less direct supervision. Increasing $\rho$ beyond 0.25 does not further improve mean AUC. At $\rho=0.5$, the mean last-20 AUC SD is the lowest at 0.031 points, but mean AUC and F1 are 0.16 and 0.61 points below those obtained at $\rho=0.25$. A larger positive allocation can therefore slightly reduce late-round variation while also reducing the number of unlabeled observations used in each update.
+
+The differences in mean AUC among the four settings are smaller than their across-seed standard deviations, so the experiment does not establish $\rho=0.25$ as a statistically significant or universal optimum. Seed 45 remains difficult under every allocation, with AUC between 86.65\% and 87.36\%; changing the mini-batch composition does not remove the effect of this partition and optimization trajectory. We retain $\rho=0.25$ as a practical balance between mean AUC, F1, and late-round variation.
+
+Changing $\rho$ also changes the unlabeled batch count $b_u=(1-\rho)B$. Consequently, the expected-negative-support statistic used by the complete method changes with the batch composition. This experiment measures the sensitivity of the complete FedEPPU procedure to its P/U allocation rather than isolating the sampler while holding the support statistic fixed. The selected value remains a sampling hyperparameter; it is neither an estimate of the unlabeled positive prior nor a theoretically optimal allocation.
+
+\subsubsection{Number of Clients}
+We vary the number of clients among 3, 6, 9, and 12 while keeping the total training data, Dirichlet concentration, model, local training rule, and number of communication rounds fixed. All clients participate in every round. Each configuration is evaluated over seeds 42--46 (Table~\ref{tab:sensitivity}).
+
+The three-client setting has the highest mean ACC, AUC, and F1. Performance falls at six clients and increases at nine and 12 clients, where mean AUC is about 90.6\%. The across-seed AUC standard deviation decreases from 2.95 points at three clients to 1.07 and 0.96 points at nine and 12 clients. Mean within-run last-20 AUC SD is below 0.05 points for each setting.
+
+Changing the client count also changes the realized priors, sample sizes, and potentially the total number of local updates. The minimum client size is 1011, 291, 152, and 115 for 3, 6, 9, and 12 clients, respectively. The nonmonotonic performance therefore reflects a change in the whole partition and cannot be attributed solely to client count.
+
+\subsubsection{Proxy-Set Size}
+We vary the proxy-set size among 128, 256, 512, and 1024. Each proxy set is split class-wise into disjoint selection and calibration subsets of approximately equal size. All configurations share the same client training data, test data, initialization, training budget, and random seeds. Proxy samples are nested subsets of a fixed candidate pool, so changing proxy size does not alter private client training data. Results are given in Table~\ref{tab:sensitivity}. Across seeds, the standard deviation of the selected threshold is 2.22, 2.03, 1.76, and 2.06 for the four proxy sizes.
+
+Increasing the proxy pool from 128 to 256 samples raises mean BAcc from 82.30\% to 83.98\% and AUC from 90.85\% to 91.80\%. The differences between 512 and 1024 samples are smaller: 0.12 points in BAcc and 0.22 points in AUC. This pattern is consistent with diminishing benefit from additional proxy labels in the tested range.
+
+Across-seed threshold standard deviations do not decrease monotonically. Thresholds from different models can differ because of logit scale and offset, so this statistic alone does not measure calibration quality. The default of 1024 gives the highest mean BAcc and AUC in this experiment, while 512 gives similar results with fewer auxiliary labels.
+
+
+\FloatBarrier
+
+\section{Discussion}
+
+The experiments suggest that the ranking task and complementary mass account for the larger component-wise gains in mean AUC in the original component ablations. The local hard gate targets a narrower failure mode: it removes the ranking gradient only when the expected latent-negative count is below one, while retaining nnPU classification. The strict deterministic comparison in Section~\ref{sec:support_analysis} reduces the extreme-client gradient abnormalities and modestly improves mean predictive performance. In the four-way support ablation, neither the local gate nor server correction improves the five-seed mean when used alone; their combination performs best and improves the three seeds containing an extreme-prior client, while leaving the two non-triggered seeds unchanged. This pattern is consistent with their distinct roles: the local gate controls whether an auxiliary ranking gradient enters the client update, whereas server support controls the aggregation contribution of the resulting client model. The result is limited to five seeds and is not treated as a universal interaction claim. The support statistic is fixed by the prior and batch size and saturates at one; it does not distinguish clients once their expected negative count reaches that threshold. It also does not measure feature diversity or resolve conflicting update directions. Complementary mass bounds the base contribution only; support normalization can assign a majority of the final aggregation weight to one client. The method therefore does not guarantee a one-half cap on final client influence.
+
+The use of known priors and labeled proxy data limits the scope of the conclusions. The overall comparison includes both training and inference differences, so its gains cannot be assigned entirely to the local loss or aggregation rule. The component and threshold ablations provide more specific evidence. The matched-proxy experiment in Section~\ref{sec:matched_proxy} separates part of this effect on CIFAR-10: the BAcc and F1 gaps shrink under equal proxy access, while the AUC gap is largely retained. Matched-proxy comparisons on the remaining datasets, estimated priors, and external medical and industrial data remain for future evaluation. Keeping raw samples local is a data-access constraint, not a guarantee against information leakage.
+
+The Absolute ranking correction performs better than Clamp under the evaluated deterministic protocol, but it reverses the gradient when the reconstructed empirical ranking risk is negative. The present comparison supports its empirical use in this implementation; a general theoretical characterization of this correction remains open.
+
+\section{Conclusion}
+
+We presented FedEPPU for federated binary PU learning with heterogeneous client priors and sample sizes. The method combines nnPU classification with an auxiliary PU ranking task whose contribution is disabled when the expected latent-negative count is below one. Complementary mass limits the base contribution of an absolute-majority client; support correction then determines the normalized final weights, which need not satisfy the same one-half bound. Disjoint labeled proxy subsets select a raw global checkpoint and its decision threshold. The four-dataset comparison and CIFAR-10 ablations show improvements in mean predictive performance under the evaluated protocol, with gains that depend on the component and metric. Further work will examine unknown priors, matched-proxy evaluation on additional datasets, and larger federated deployments.
+
+\section*{Acknowledgment}
+
+The authors would like to thank XXX for valuable discussions and experimental support.
+
+\begin{thebibliography}{99}
+
+\bibitem{ref_fedavg}
+H. B. McMahan, E. Moore, D. Ramage, S. Hampson, and B. Ag\"uera y Arcas, ``Communication-efficient learning of deep networks from decentralized data,'' in \emph{Proc. AISTATS}, vol. 54, 2017, pp. 1273--1282.
+
+\bibitem{ref_fl_survey}
+P. Kairouz \emph{et al.}, ``Advances and open problems in federated learning,'' \emph{Foundations and Trends in Machine Learning}, vol. 14, nos. 1--2, pp. 1--210, 2021, doi: 10.1561/2200000083.
+
+\bibitem{ref_pu_survey}
+J. Bekker and J. Davis, ``Learning from positive and unlabeled data: A survey,'' \emph{Machine Learning}, vol. 109, pp. 719--760, 2020, doi: 10.1007/s10994-020-05877-5.
+
+\bibitem{ref_elkan}
+C. Elkan and K. Noto, ``Learning classifiers from only positive and unlabeled data,'' in \emph{Proc. ACM SIGKDD}, 2008, pp. 213--220, doi: 10.1145/1401890.1401920.
+
+\bibitem{ref_pu}
+M. C. du Plessis, G. Niu, and M. Sugiyama, ``Convex formulation for learning from positive and unlabeled data,'' in \emph{Proc. ICML}, vol. 37, 2015, pp. 1386--1394.
+
+\bibitem{ref_nnpu}
+R. Kiryo, G. Niu, M. C. du Plessis, and M. Sugiyama, ``Positive-unlabeled learning with non-negative risk estimator,'' in \emph{Proc. NeurIPS}, 2017, pp. 1675--1685.
+
+\bibitem{ref_fedpu}
+X. Lin, H. Chen, Y. Xu, C. Xu, X. Gui, Y. Deng, and Y. Wang, ``Federated learning with positive and unlabeled data,'' in \emph{Proc. ICML}, vol. 162, 2022, pp. 13344--13355.
+
+\bibitem{ref_prior_estimation}
+M. C. du Plessis, G. Niu, and M. Sugiyama, ``Class-prior estimation for learning from positive and unlabeled data,'' in \emph{Proc. ACML}, vol. 45, 2016, pp. 221--236.
+
+\bibitem{ref_puauc}
+T. Sakai, G. Niu, and M. Sugiyama, ``Semi-supervised AUC optimization based on positive-unlabeled learning,'' \emph{Machine Learning}, vol. 107, no. 4, pp. 767--794, 2018, doi: 10.1007/s10994-017-5678-9.
+
+\bibitem{ref_fedprox}
+T. Li, A. K. Sahu, M. Zaheer, M. Sanjabi, A. Talwalkar, and V. Smith, ``Federated optimization in heterogeneous networks,'' in \emph{Proc. MLSys}, 2020.
+
+\bibitem{ref_scaffold}
+S. P. Karimireddy, S. Kale, M. Mohri, S. J. Reddi, S. U. Stich, and A. T. Suresh, ``SCAFFOLD: Stochastic controlled averaging for federated learning,'' in \emph{Proc. ICML}, vol. 119, 2020, pp. 5132--5143.
+
+\bibitem{ref_fednova}
+J. Wang, Q. Liu, H. Liang, G. Joshi, and H. V. Poor, ``Tackling the objective inconsistency problem in heterogeneous federated optimization,'' in \emph{Proc. NeurIPS}, vol. 33, 2020, pp. 7611--7623.
+
+\bibitem{ref_feddyn}
+D. A. E. Acar, Y. Zhao, R. M. Navarro, M. Mattina, P. N. Whatmough, and V. Saligrama, ``Federated learning based on dynamic regularization,'' in \emph{Proc. ICLR}, 2021.
+
+\bibitem{ref_feddisco}
+R. Ye, M. Xu, J. Wang, C. Xu, S. Chen, and Y. Wang, ``FedDisco: Federated learning with discrepancy-aware collaboration,'' in \emph{Proc. ICML}, vol. 202, 2023, pp. 39879--39902.
+
+\bibitem{ref_moon}
+Q. Li, B. He, and D. Song, ``Model-contrastive federated learning,'' in \emph{Proc. IEEE/CVF CVPR}, 2021, pp. 10713--10722.
+
+\bibitem{ref_heteroselect}
+M. A. Masud, M. A. Jahin, and M. Hasan, ``Stabilizing federated learning under extreme heterogeneity with HeteRo-Select,'' \emph{arXiv preprint arXiv:2508.06692v1}, 2025.
+
+\bibitem{ref_mrfl}
+K. Wang, A. Zhang, T. Liu, W. Zhang, and G. Zhang, ``Multi-stage robust federated learning: Addressing label noise under data heterogeneity and imbalance,'' \emph{ACM Trans. Intell. Syst. Technol.}, 2026, doi: 10.1145/3800941.
+
+\bibitem{ref_sar}
+J. Bekker and J. Davis, ``Learning from positive and unlabeled data under the selected at random assumption,'' in \emph{Proc. Int. Workshop Learning with Imbalanced Domains: Theory and Applications}, vol. 94, 2018, pp. 8--22.
+
+\bibitem{ref_distpu}
+Y. Zhao, Q. Xu, Y. Jiang, P. Wen, and Q. Huang, ``Dist-PU: Positive-unlabeled learning from a label distribution perspective,'' in \emph{Proc. IEEE/CVF CVPR}, 2022, pp. 14461--14470.
+
+\bibitem{ref_auc_consistency}
+W. Gao and Z.-H. Zhou, ``On the consistency of AUC pairwise optimization,'' in \emph{Proc. IJCAI}, 2015, pp. 939--945.
+
+\bibitem{ref_multitask}
+R. Caruana, ``Multitask learning,'' \emph{Machine Learning}, vol. 28, pp. 41--75, 1997, doi: 10.1023/A:1007379606734.
+
+\bibitem{ref_sgdr}
+I. Loshchilov and F. Hutter, ``SGDR: Stochastic gradient descent with warm restarts,'' in \emph{Proc. ICLR}, 2017.
+
+\bibitem{ref_model_selection}
+G. C. Cawley and N. L. C. Talbot, ``On over-fitting in model selection and subsequent selection bias in performance evaluation,'' \emph{J. Mach. Learn. Res.}, vol. 11, pp. 2079--2107, 2010.
+
+\bibitem{ref_sgd_analysis}
+S. Ghadimi and G. Lan, ``Stochastic first- and zeroth-order methods for nonconvex stochastic programming,'' \emph{SIAM J. Optim.}, vol. 23, no. 4, pp. 2341--2368, 2013, doi: 10.1137/120880811.
+
+\bibitem{ref_fashion}
+H. Xiao, K. Rasul, and R. Vollgraf, ``Fashion-MNIST: A novel image dataset for benchmarking machine learning algorithms,'' \emph{arXiv preprint arXiv:1708.07747}, 2017.
+
+\bibitem{ref_cifar}
+A. Krizhevsky, ``Learning multiple layers of features from tiny images,'' University of Toronto, Toronto, ON, Canada, Tech. Rep., 2009.
+
+\bibitem{ref_chest}
+D. S. Kermany \emph{et al.}, ``Identifying medical diagnoses and treatable diseases by image-based deep learning,'' \emph{Cell}, vol. 172, no. 5, pp. 1122--1131.e9, 2018, doi: 10.1016/j.cell.2018.02.010.
+
+\bibitem{ref_kolektor}
+J. Bo\v{z}i\v{c}, D. Tabernik, and D. Sko\v{c}aj, ``Mixed supervision for surface-defect detection: From weakly to fully supervised learning,'' \emph{Computers in Industry}, vol. 129, Art. no. 103459, 2021, doi: 10.1016/j.compind.2021.103459.
+
+\bibitem{ref_adamw}
+I. Loshchilov and F. Hutter, ``Decoupled weight decay regularization,'' in \emph{Proc. ICLR}, 2019.
+
+\bibitem{ref_benchmark_variance}
+X. Bouthillier \emph{et al.}, ``Accounting for variance in machine learning benchmarks,'' in \emph{Proc. MLSys}, vol. 3, 2021, pp. 747--769.
+\end{thebibliography}
+
+\end{document}
